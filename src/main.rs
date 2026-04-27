@@ -2,6 +2,7 @@ pub mod alert;
 pub mod cli;
 pub mod collector;
 pub mod config;
+pub mod engine;
 pub mod models;
 pub mod persistence;
 
@@ -30,5 +31,5 @@ async fn main() -> Result<()> {
 
     tracing::info!(?config, "Loaded application configuration");
 
-    Ok(())
+    engine::run(config).await
 }
