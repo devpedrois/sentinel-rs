@@ -52,7 +52,7 @@ impl CsvWriter {
             current_file,
             file_started_at,
             rotation_policy: RotationPolicy {
-                max_file_size_bytes: config.max_file_size_mb * 1024 * 1024,
+                max_file_size_bytes: config.max_file_size_mb.saturating_mul(1024 * 1024),
                 rotate_every: config.rotate_every,
                 max_files: config.max_files,
             },
@@ -128,6 +128,72 @@ impl CsvWriter {
             .truncate(true)
             .open(&self.current_file)
             .await?;
+        Ok(())
+    }
+
+    fn required_layout(&self) -> (usize, usize) {
+        self.buffer
+            .iter()
+            .fold((0, 0), |(max_disks, max_ifaces), snapshot| {
+                (
+                    max_disks.max(snapshot.disks.len()),
+                    max_ifaces.max(snapshot.network.len()),
+                )
+            })
+    }
+
+    async fn rotate_for_schema_expansion(
+        &mut self,
+        required_disks: usize,
+        required_interfaces: usize,
+    ) -> anyhow::Result<()> {
+        if !self.header_written
+            || (required_disks <= self.num_disks && required_interfaces <= self.num_interfaces)
+        {
+            return Ok(());
+        }
+
+        let previous_disks = self.num_disks;
+        let previous_interfaces = self.num_interfaces;
+        let metadata = match fs::metadata(&self.current_file).await {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+
+        if metadata.as_ref().is_some_and(|metadata| metadata.len() > 0) {
+            let force_rotation_policy = RotationPolicy {
+                max_file_size_bytes: 0,
+                rotate_every: None,
+                max_files: self.rotation_policy.max_files,
+            };
+
+            let rotation_result = check_and_rotate(
+                &self.current_file,
+                &force_rotation_policy,
+                "csv",
+                self.file_started_at,
+            )
+            .await?;
+
+            if rotation_result.rotated {
+                self.reopen_active_file().await?;
+            }
+        }
+
+        self.header_written = false;
+        self.num_disks = 0;
+        self.num_interfaces = 0;
+        self.file_started_at = Some(SystemTime::now());
+
+        info!(
+            previous_disks,
+            previous_interfaces,
+            required_disks,
+            required_interfaces,
+            "CSV schema expanded, starting a new file layout"
+        );
+
         Ok(())
     }
 
@@ -208,13 +274,15 @@ impl CsvWriter {
             self.file_started_at = Some(SystemTime::now());
         }
         self.load_existing_layout().await?;
+        let (required_disks, required_interfaces) = self.required_layout();
+        self.rotate_for_schema_expansion(required_disks, required_interfaces)
+            .await?;
 
         let mut records: Vec<Vec<String>> = Vec::new();
 
         if !self.header_written {
-            let first = &self.buffer[0];
-            self.num_disks = first.disks.len();
-            self.num_interfaces = first.network.len();
+            self.num_disks = required_disks;
+            self.num_interfaces = required_interfaces;
             records.push(self.build_header_record());
             self.header_written = true;
         }
@@ -517,5 +585,120 @@ mod tests {
             .count();
 
         assert_eq!(header_count, 1);
+    }
+
+    #[tokio::test]
+    async fn uses_largest_topology_seen_in_the_buffer_for_the_first_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = CsvWriter::with_params(dir.path().to_path_buf(), 2, test_policy());
+
+        let first = make_snapshot_with_peripherals("t1", vec![sample_disk("C:")], vec![]);
+        let second = make_snapshot_with_peripherals(
+            "t2",
+            vec![sample_disk("C:"), sample_disk("D:")],
+            vec![sample_net("eth0")],
+        );
+
+        writer.write(&first).await.unwrap();
+        writer.write(&second).await.unwrap();
+
+        let content = fs::read_to_string(dir.path().join("sentinel.csv"))
+            .await
+            .unwrap();
+        let header = content.lines().next().unwrap();
+        let rows: Vec<Vec<String>> = content
+            .lines()
+            .skip(1)
+            .map(|line| {
+                line.split(',')
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        assert!(
+            header.contains("disk_mount_1"),
+            "header should expand to include the second disk column: {header}"
+        );
+        assert!(
+            header.contains("net_interface_0"),
+            "header should expand to include the first network interface column: {header}"
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][7], "");
+        assert_eq!(rows[1][7], "D:");
+        assert_eq!(rows[1][9], "eth0");
+    }
+
+    #[tokio::test]
+    async fn rotates_current_file_before_appending_rows_that_need_a_larger_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = CsvWriter::with_params(dir.path().to_path_buf(), 1, test_policy());
+
+        let first = make_snapshot_with_peripherals("t1", vec![sample_disk("C:")], vec![]);
+        let second = make_snapshot_with_peripherals(
+            "t2",
+            vec![sample_disk("C:"), sample_disk("D:")],
+            vec![sample_net("eth0")],
+        );
+
+        writer.write(&first).await.unwrap();
+        writer.write(&second).await.unwrap();
+
+        let current_path = dir.path().join("sentinel.csv");
+        let current_content = fs::read_to_string(&current_path).await.unwrap();
+        let current_lines: Vec<&str> = current_content.lines().collect();
+
+        assert_eq!(current_lines.len(), 2);
+        assert!(
+            current_lines[0].contains("disk_mount_1"),
+            "new active file should have the expanded schema: {}",
+            current_lines[0]
+        );
+        assert!(
+            current_lines[0].contains("net_interface_0"),
+            "new active file should have the expanded schema: {}",
+            current_lines[0]
+        );
+        assert!(
+            current_lines[1].contains("D:"),
+            "new active file should keep the extra disk data: {}",
+            current_lines[1]
+        );
+        assert!(
+            current_lines[1].contains("eth0"),
+            "new active file should keep the extra interface data: {}",
+            current_lines[1]
+        );
+
+        let mut entries = fs::read_dir(dir.path()).await.unwrap();
+        let mut rotated_files = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let path = entry.path();
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with("sentinel_") && name.ends_with(".csv"))
+                .unwrap_or(false)
+            {
+                rotated_files.push(path);
+            }
+        }
+
+        assert_eq!(rotated_files.len(), 1);
+
+        let rotated_content = fs::read_to_string(&rotated_files[0]).await.unwrap();
+        let rotated_lines: Vec<&str> = rotated_content.lines().collect();
+        assert_eq!(rotated_lines.len(), 2);
+        assert!(
+            !rotated_lines[0].contains("disk_mount_1"),
+            "old rotated file should preserve the original schema: {}",
+            rotated_lines[0]
+        );
+        assert!(
+            rotated_lines[1].contains("t1"),
+            "rotated file should keep the original row: {}",
+            rotated_lines[1]
+        );
     }
 }

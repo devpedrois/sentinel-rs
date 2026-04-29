@@ -31,7 +31,7 @@ impl JsonWriter {
             current_file,
             file_started_at,
             rotation_policy: RotationPolicy {
-                max_file_size_bytes: config.max_file_size_mb * 1024 * 1024,
+                max_file_size_bytes: config.max_file_size_mb.saturating_mul(1024 * 1024),
                 rotate_every: config.rotate_every,
                 max_files: config.max_files,
             },

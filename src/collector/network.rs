@@ -29,15 +29,7 @@ impl Default for NetworkCollector {
 impl NetworkCollector {
     pub fn new() -> Self {
         let networks = Networks::new_with_refreshed_list();
-        let previous: HashMap<String, (u64, u64)> = networks
-            .iter()
-            .map(|(name, data)| {
-                (
-                    name.to_string(),
-                    (data.total_transmitted(), data.total_received()),
-                )
-            })
-            .collect();
+        let previous = HashMap::new();
 
         Self { networks, previous }
     }
@@ -139,6 +131,28 @@ mod tests {
                     "RX bytes should be monotonically non-decreasing"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn first_collection_reports_zero_deltas_for_known_interfaces() {
+        let mut collector = NetworkCollector::new();
+
+        let metrics = collector
+            .collect_sync()
+            .expect("first collection should succeed");
+
+        for iface in &metrics {
+            assert_eq!(
+                iface.tx_delta, 0,
+                "first TX delta for {} should be zero",
+                iface.interface
+            );
+            assert_eq!(
+                iface.rx_delta, 0,
+                "first RX delta for {} should be zero",
+                iface.interface
+            );
         }
     }
 

@@ -1,15 +1,7 @@
-pub mod alert;
-pub mod cli;
-pub mod collector;
-pub mod config;
-pub mod engine;
-pub mod models;
-pub mod persistence;
-
 use anyhow::{Context, Result};
 use clap::Parser;
-use cli::CliArgs;
-use config::AppConfig;
+use sentinel::cli::CliArgs;
+use sentinel::config::AppConfig;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -31,5 +23,5 @@ async fn main() -> Result<()> {
 
     tracing::info!(?config, "Loaded application configuration");
 
-    engine::run(config).await
+    sentinel::engine::run(config).await
 }

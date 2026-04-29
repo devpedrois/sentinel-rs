@@ -46,6 +46,13 @@ pub struct SystemCollector {
     network: NetworkCollector,
 }
 
+type CollectionTaskOutput = (
+    Result<SystemSnapshot, SystemCollectorError>,
+    CoreMetricsCollector,
+    DiskCollector,
+    NetworkCollector,
+);
+
 impl Default for SystemCollector {
     fn default() -> Self {
         Self::new()
@@ -67,7 +74,7 @@ impl SystemCollector {
         let mut disk = std::mem::take(&mut self.disk);
         let mut network = std::mem::take(&mut self.network);
 
-        let result = tokio::task::spawn_blocking(move || {
+        let task = tokio::task::spawn_blocking(move || {
             let snapshot = assemble_snapshot(
                 timestamp,
                 || core.collect_sync(),
@@ -76,15 +83,24 @@ impl SystemCollector {
             );
 
             (snapshot, core, disk, network)
-        })
-        .await?;
+        });
 
-        let (snapshot, core, disk, network) = result;
-        self.core = core;
-        self.disk = disk;
-        self.network = network;
+        self.await_collection_task(task).await
+    }
 
-        snapshot
+    async fn await_collection_task(
+        &mut self,
+        task: tokio::task::JoinHandle<CollectionTaskOutput>,
+    ) -> Result<SystemSnapshot, SystemCollectorError> {
+        match task.await {
+            Ok((snapshot, core, disk, network)) => {
+                self.core = core;
+                self.disk = disk;
+                self.network = network;
+                snapshot
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 }
 
@@ -172,12 +188,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{assemble_snapshot, SystemCollectorError};
+    use std::{sync::Arc, time::Duration};
+
+    use super::{
+        assemble_snapshot, CoreMetricsCollector, DiskCollector, NetworkCollector,
+        SystemCollectorError,
+    };
     use crate::collector::{
         cpu::CpuCollectorError, disk::DiskCollectorError, memory::MemoryCollectorError,
         network::NetworkCollectorError,
     };
-    use crate::models::{CpuMetrics, DiskMetrics, MemoryMetrics, NetworkMetrics, SystemSnapshot};
+    use crate::models::{CpuMetrics, DiskMetrics, MemoryMetrics, NetworkMetrics};
 
     #[test]
     fn reexports_concrete_collectors() {
@@ -208,15 +229,6 @@ mod tests {
             (0.0..=100.0).contains(&snapshot.memory.usage_percent),
             "memory usage should stay within percentage bounds"
         );
-    }
-
-    #[tokio::test]
-    async fn collect_returns_result_type() {
-        let mut collector = crate::collector::SystemCollector::new();
-
-        let result: Result<SystemSnapshot, SystemCollectorError> = collector.collect().await;
-
-        assert!(result.is_ok() || result.is_err());
     }
 
     #[test]
@@ -291,6 +303,53 @@ mod tests {
         assert_eq!(snapshot.memory.usage_percent, 50.0);
         assert_eq!(snapshot.disks.len(), 1);
         assert_eq!(snapshot.network.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn recovers_after_collection_task_join_failure() {
+        let mut collector = crate::collector::SystemCollector::new();
+
+        let task = tokio::task::spawn_blocking(
+            || -> (
+                Result<crate::models::SystemSnapshot, SystemCollectorError>,
+                CoreMetricsCollector,
+                DiskCollector,
+                NetworkCollector,
+            ) {
+                panic!("boom");
+            },
+        );
+
+        let result = collector.await_collection_task(task).await;
+
+        assert!(matches!(result, Err(SystemCollectorError::TaskJoin(_))));
+        assert!(
+            collector.collect().await.is_ok(),
+            "collector should recover and collect again after task failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_remains_usable_after_cancellation() {
+        let collector = Arc::new(tokio::sync::Mutex::new(
+            crate::collector::SystemCollector::new(),
+        ));
+        let running_collector = Arc::clone(&collector);
+
+        let running = tokio::spawn(async move {
+            let mut collector = running_collector.lock().await;
+            collector.collect().await
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        running.abort();
+        let _ = running.await;
+
+        let mut collector = collector.lock().await;
+        assert!(
+            collector.collect().await.is_ok(),
+            "collector should stay usable after an in-flight cancellation"
+        );
     }
 
     #[test]

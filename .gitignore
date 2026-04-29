@@ -1,6 +1,9 @@
 /target
-/.tools
-/.tmp-manual-csv
-/.tmp-manual-json
-/.tmp-manual-json-direct
-/.tmp-manual-rotation
+*.log
+/logs
+*.pdb
+.env
+.env.*
+.tmp-manual-*
+.tmp-review-*
+.tools/

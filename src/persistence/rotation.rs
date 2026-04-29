@@ -57,7 +57,7 @@ pub async fn check_and_rotate(
         });
     }
 
-    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S");
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S%.3f");
     let dir = current_path.parent().unwrap_or(Path::new("."));
     let rotated_name = format!("sentinel_{timestamp}.{extension}");
     let rotated_path = dir.join(&rotated_name);
