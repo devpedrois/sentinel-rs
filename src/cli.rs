@@ -41,7 +41,7 @@ pub struct CliArgs {
     #[arg(long)]
     pub webhook_url: Option<String>,
 
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 10, value_parser = parse_buffer_size)]
     pub buffer_size: usize,
 
     #[arg(short = 'v', long)]
@@ -70,6 +70,18 @@ fn parse_percentage(value: &str) -> Result<u8, String> {
     }
 
     Ok(parsed as u8)
+}
+
+fn parse_buffer_size(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| "buffer-size must be a positive integer".to_string())?;
+
+    if parsed < 1 {
+        return Err("buffer-size must be at least 1".to_string());
+    }
+
+    Ok(parsed)
 }
 
 fn parse_max_file_size(value: &str) -> Result<u64, String> {
@@ -127,6 +139,13 @@ mod tests {
     #[test]
     fn rejects_max_file_size_below_minimum() {
         let result = CliArgs::try_parse_from(["sentinel", "--max-file-size", "0"]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_buffer_size_below_minimum() {
+        let result = CliArgs::try_parse_from(["sentinel", "--buffer-size", "0"]);
 
         assert!(result.is_err());
     }

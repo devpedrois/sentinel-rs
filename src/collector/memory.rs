@@ -9,6 +9,8 @@ use super::MetricCollector;
 pub enum MemoryCollectorError {
     #[error("total memory reported as zero")]
     ZeroTotalMemory,
+    #[error("blocking task panicked: {0}")]
+    TaskJoin(#[from] tokio::task::JoinError),
 }
 
 pub struct MemoryCollector {
@@ -54,7 +56,14 @@ impl MetricCollector for MemoryCollector {
     type Error = MemoryCollectorError;
 
     async fn collect(&mut self) -> Result<Self::Output, Self::Error> {
-        self.collect_sync()
+        let mut this = std::mem::take(self);
+        let (result, returned) = tokio::task::spawn_blocking(move || {
+            let r = this.collect_sync();
+            (r, this)
+        })
+        .await?;
+        *self = returned;
+        result
     }
 }
 

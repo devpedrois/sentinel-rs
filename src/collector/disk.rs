@@ -9,6 +9,8 @@ use super::MetricCollector;
 pub enum DiskCollectorError {
     #[error("failed to query disk information")]
     QueryFailed,
+    #[error("blocking task panicked: {0}")]
+    TaskJoin(#[from] tokio::task::JoinError),
 }
 
 pub struct DiskCollector {
@@ -63,7 +65,14 @@ impl MetricCollector for DiskCollector {
     type Error = DiskCollectorError;
 
     async fn collect(&mut self) -> Result<Self::Output, Self::Error> {
-        self.collect_sync()
+        let mut this = std::mem::take(self);
+        let (result, returned) = tokio::task::spawn_blocking(move || {
+            let r = this.collect_sync();
+            (r, this)
+        })
+        .await?;
+        *self = returned;
+        result
     }
 }
 
